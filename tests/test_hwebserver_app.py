@@ -150,3 +150,17 @@ def test_stopped_server_refuses_commands(served, monkeypatch):
     assert hwebserver_app.execute(_authed(), command="x") == (503, "SERVER_STOPPED")
     assert hwebserver_app.session_info(_authed()) == (503, "SERVER_STOPPED")
     assert hwebserver_app.health(_authed())["status"] == "stopped"
+
+
+def test_health_reports_a_crash_log_for_this_process(served, monkeypatch, tmp_path):
+    """Houdini keeps serving health from its crash dialog, so "ok" would never end."""
+    monkeypatch.setenv("HOUDINI_TEMP_DIR", str(tmp_path))
+    monkeypatch.setattr(hwebserver_app, "_crash_log", None)
+    monkeypatch.setattr(hwebserver_app, "_LOADED_AT", 0)
+    assert hwebserver_app.health(_authed())["status"] == "ok"
+
+    (tmp_path / f"crash.untitled.user_{os.getpid() + 1}_log.txt").write_text("")
+    assert hwebserver_app.health(_authed())["status"] == "ok"
+
+    (tmp_path / f"crash.untitled.user_{os.getpid()}_log.txt").write_text("")
+    assert hwebserver_app.health(_authed())["status"] == "crashed"

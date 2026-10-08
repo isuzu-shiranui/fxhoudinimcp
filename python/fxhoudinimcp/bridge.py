@@ -13,6 +13,7 @@ from __future__ import annotations
 
 # Built-in
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
@@ -23,7 +24,7 @@ import httpx
 
 # Internal
 from fxhoudinimcp.errors import ConnectionError, HoudiniCommandError
-from fxhoudinimcp.instance import auth_headers
+from fxhoudinimcp.instance import auth_headers, descriptor_for, process_alive
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,12 @@ NO_TIMEOUT = float("inf")
 def _rpc_body(func_name: str, **kwargs: Any) -> dict[str, str]:
     """Build form data for an hwebserver JSON-encoded RPC call."""
     return {"json": json.dumps([func_name, [], kwargs])}
+
+
+# How often Houdini is checked while a command runs.
+_WATCH_INTERVAL = 2.0
+_WATCH_PROBE_TIMEOUT = 3.0
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 # Matches the plugin's own search range: a second Houdini moves itself to the
@@ -156,6 +163,64 @@ class HoudiniBridge:
                 self._api_url, data=data, timeout=effective, headers=auth_headers(self.port)
             )
 
+    async def _post_watched(
+        self, command: str, data: dict[str, Any], timeout: float | None
+    ) -> httpx.Response:
+        """_post, abandoned with ConnectionError if Houdini goes away meanwhile.
+
+        A command with no deadline would otherwise wait forever on a Houdini that
+        has exited, or crashed and is sitting on its crash dialog.
+        """
+        request = asyncio.ensure_future(self._post(data, timeout=timeout))
+        watcher = asyncio.ensure_future(self._houdini_gone())
+        try:
+            done, _ = await asyncio.wait({request, watcher}, return_when=asyncio.FIRST_COMPLETED)
+            if request in done:
+                return request.result()
+            reason = watcher.result()
+            raise ConnectionError(
+                f"Houdini {reason} while running {command}. Its result is lost; "
+                "check the scene once Houdini is back.",
+                details={"url": self.base_url, "command": command},
+            )
+        finally:
+            for task in (request, watcher):
+                if not task.done():
+                    task.cancel()
+            with contextlib.suppress(BaseException):
+                await watcher
+
+    async def _houdini_gone(self) -> str:
+        """Return why Houdini is gone; never returns while it is still there.
+
+        Only definite signs count: the pid gone, a 401 because a new Houdini
+        took the port with another token, or health reporting "crashed" (Houdini
+        sits on its crash dialog with the process alive and health still
+        served). An unanswered probe does not: a long command holding the GIL
+        delays health on a healthy Houdini. An exit closes the request's own
+        socket in any case.
+        """
+        headers = auth_headers(self.port)
+        pid = None
+        if self.host in _LOOPBACK_HOSTS:
+            pid = (descriptor_for(self.port) or {}).get("pid")
+        async with httpx.AsyncClient(timeout=_WATCH_PROBE_TIMEOUT, trust_env=False) as probe:
+            while True:
+                await asyncio.sleep(_WATCH_INTERVAL)
+                if isinstance(pid, int) and not process_alive(pid):
+                    return f"exited (pid {pid})"
+                try:
+                    response = await probe.post(
+                        self._api_url, data=_rpc_body("mcp.health"), headers=headers
+                    )
+                    payload = response.json() if response.status_code == 200 else None
+                except (httpx.TransportError, ValueError):
+                    continue
+                if response.status_code == 401:
+                    return "was replaced by another session on its port"
+                if isinstance(payload, dict) and payload.get("status") == "crashed":
+                    return "crashed (its crash dialog is open)"
+
     async def execute(
         self,
         command: str,
@@ -180,14 +245,15 @@ class HoudiniBridge:
         logger.info("→ Houdini: %s", command)
 
         try:
-            response = await self._post(
+            response = await self._post_watched(
+                command,
                 _rpc_body(
                     "mcp.execute",
                     command=command,
                     params=params or {},
                     request_id=request_id,
                 ),
-                timeout=timeout or self.timeout,
+                timeout or self.timeout,
             )
             response.raise_for_status()
         except (httpx.ConnectError, httpx.RemoteProtocolError) as e:

@@ -14,8 +14,11 @@ value HOM cannot serialise degrades instead of collapsing into an opaque 500.
 from __future__ import annotations
 
 # Built-in
+import glob
 import json
 import os
+import tempfile
+import time
 import traceback
 
 # Third-party
@@ -152,6 +155,37 @@ def _stopped() -> hwebserver.Response:
     return _error(503, "SERVER_STOPPED", "the FXHoudini-MCP server was stopped in Houdini")
 
 
+###### Crash detection
+
+_LOADED_AT = time.time()
+_crash_log: str | None = None
+
+
+def _crashed() -> bool:
+    """Whether Houdini has written a crash log for this process since load.
+
+    After a crash Houdini sits on its crash dialog with the process alive, and
+    this worker thread keeps serving, so health alone would answer "ok" for
+    ever. The log is named crash.<hip>.<user>_<pid>_log.txt in the Houdini
+    temp directory; the time check skips one left by an earlier process that
+    had the same pid.
+    """
+    global _crash_log
+    if _crash_log is not None:
+        return True
+    directory = os.environ.get("HOUDINI_TEMP_DIR") or os.path.join(
+        tempfile.gettempdir(), "houdini_temp"
+    )
+    for path in glob.glob(os.path.join(glob.escape(directory), f"crash.*_{os.getpid()}_log.txt")):
+        try:
+            if os.path.getmtime(path) >= _LOADED_AT:
+                _crash_log = path
+                return True
+        except OSError:
+            continue
+    return False
+
+
 ###### Endpoints
 
 
@@ -194,12 +228,19 @@ def health(request):
 
     A stopped server still answers, as "stopped", so a restart in the same
     session recognises its own port; the MCP client skips anything not "ok".
+    "crashed" lets a client waiting on a command give up on it.
     """
     refusal = _refusal(request)
     if refusal is not None:
         return refusal
+    if _crashed():
+        status = "crashed"
+    elif startup.is_accepting():
+        status = "ok"
+    else:
+        status = "stopped"
     return {
-        "status": "ok" if startup.is_accepting() else "stopped",
+        "status": status,
         "pid": os.getpid(),
         "houdini_version": os.environ.get("HOUDINI_VERSION", "unknown"),
     }

@@ -17,6 +17,7 @@ from fxhoudinimcp.compat import compatibility_warning, missing_commands
 from fxhoudinimcp.errors import ConnectionError as HoudiniConnectionError
 from fxhoudinimcp.node_versions import sampled_series, staleness_warning
 from fxhoudinimcp.server import _get_bridge, mcp
+from fxhoudinimcp.tool_traits import groups_off
 
 
 @mcp.tool()
@@ -89,6 +90,13 @@ async def get_houdini_connection_status(ctx: Context) -> dict:
         "health": health,
         "sessions": sessions,
     }
+    off = groups_off()
+    if off:
+        payload["tool_groups_off"] = {
+            "groups": off,
+            "note": "These tools are not registered in this session. Ask the user to "
+            "add the group to FXHOUDINIMCP_TOOL_GROUPS rather than scripting around it.",
+        }
 
     # Advisory only: tells the assistant when the version markers in the
     # instructions were never checked against this Houdini, so it knows to

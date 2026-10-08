@@ -268,6 +268,7 @@ Every tool call is one undo step. Tools leave your selection, viewport camera an
 | `HOUDINI_HOST` | `localhost` | client | Houdini host |
 | `HOUDINI_PORT` | scan 8100-8115 | client | Pin one Houdini port; switches off the scan |
 | `HOUDINI_TIMEOUT` | plugin timeout + 15 | client | Seconds the client waits for a command |
+| `FXHOUDINIMCP_TOOL_GROUPS` | all | client | Comma-separated tool groups to register besides the core ones (cache, code, graph, help, nodes, parameters, rendering, scene, session, viewport), e.g. `lops,tops`. A group is a module under `fxhoudinimcp/tools`. `core` registers the core alone, about half the tool definitions |
 | `MCP_TRANSPORT` | `stdio` | client | `stdio` or `streamable-http` |
 | `LOG_LEVEL` | `INFO` | client | Logging level |
 

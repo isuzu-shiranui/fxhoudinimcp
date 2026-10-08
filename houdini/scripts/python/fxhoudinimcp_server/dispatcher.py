@@ -79,6 +79,11 @@ _TIMEOUT_HINTS = {
         "so far. This command has no deadline unless "
         "FXHOUDINIMCP_TIMEOUT_GRAPH_COOK_FRAME_RANGE set one."
     ),
+    "tops.cook_top_node": (
+        "The blocking cook is still running in Houdini and every next command waits "
+        "behind it, cancel_top_cook included. For a long cook, start it with block=False "
+        "and follow get_work_item_states; cancel_top_cook can then reach it."
+    ),
     "code.execute_python": (
         "If this was a cook, a render or a Save to Disk, use write_cache / start_render "
         "instead of pressing buttons in Python: they have no deadline and report a verdict."

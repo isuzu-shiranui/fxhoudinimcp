@@ -25,6 +25,15 @@ def state_dir() -> Path:
     return Path(base) / "fxhoudinimcp"
 
 
+def descriptor_for(port: int) -> dict | None:
+    """The descriptor the Houdini on *port* published, or None."""
+    try:
+        data = json.loads((state_dir() / "instances" / f"{port}.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def token_for(port: int) -> str | None:
     """The token for the Houdini on *port*, or None if none is published.
 
@@ -34,12 +43,41 @@ def token_for(port: int) -> str | None:
     fixed = os.environ.get("FXHOUDINIMCP_TOKEN")
     if fixed:
         return fixed
-    try:
-        data = json.loads((state_dir() / "instances" / f"{port}.json").read_text("utf-8"))
-    except (OSError, ValueError):
-        return None
-    token = data.get("token") if isinstance(data, dict) else None
+    token = (descriptor_for(port) or {}).get("token")
     return token if isinstance(token, str) and token else None
+
+
+def process_alive(pid: int) -> bool:
+    """Whether a process with *pid* is running; True when it cannot be told.
+
+    On Windows os.kill(pid, 0) is TerminateProcess, so the handle is queried
+    instead.
+    """
+    if sys.platform != "win32":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True
+        return True
+
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32
+    process_query_limited_information = 0x1000
+    still_active = 259
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        # Access denied still means the process exists.
+        return ctypes.GetLastError() == 5
+    try:
+        code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True
+        return code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def auth_headers(port: int) -> dict[str, str]:

@@ -17,9 +17,10 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fxhoudinimcp._loader import load_markdown
-
 # Third-party
+from mcp.types import ToolAnnotations
+
+from fxhoudinimcp._loader import load_markdown
 from fxhoudinimcp._sdk import Server, build_server, forbid_unknown_arguments
 from fxhoudinimcp._version import __version__
 
@@ -27,6 +28,7 @@ from fxhoudinimcp._version import __version__
 from fxhoudinimcp.bridge import HoudiniBridge, find_servers
 from fxhoudinimcp.compat import compatibility_warning
 from fxhoudinimcp.node_versions import staleness_warning
+from fxhoudinimcp.tool_traits import READ_ONLY, is_registered, with_group_header
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +203,7 @@ async def lifespan(server: Server):
 
 mcp = build_server(
     name="FXHoudini",
-    instructions=load_markdown("instructions/server_instructions.md"),
+    instructions=with_group_header(load_markdown("instructions/server_instructions.md")),
     lifespan=lifespan,
     version=__version__,
 )
@@ -240,9 +242,16 @@ def _compact_tool(*args, **kwargs):
     The module-level function stays the original, returning its dict, so code
     and tests that call a tool directly see no difference.
     """
-    register = _sdk_tool(*args, **kwargs)
 
     def decorator(function):
+        if not is_registered(function):
+            return function
+        name = kwargs.get("name") or function.__name__
+        options = dict(kwargs)
+        if name in READ_ONLY and "annotations" not in options:
+            options["annotations"] = ToolAnnotations(readOnlyHint=True)
+        register = _sdk_tool(*args, **options)
+
         @functools.wraps(function)
         async def compact(*call_args, **call_kwargs):
             result = await function(*call_args, **call_kwargs)
@@ -255,7 +264,7 @@ def _compact_tool(*args, **kwargs):
         with contextlib.suppress(Exception):
             compact.__signature__ = inspect.signature(function, eval_str=True)
         register(compact)
-        forbid_unknown_arguments(mcp, kwargs.get("name") or function.__name__)
+        forbid_unknown_arguments(mcp, name)
         return function
 
     return decorator

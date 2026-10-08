@@ -38,7 +38,10 @@ async def cook_top_node(
     Args:
         ctx: MCP context.
         node_path: TOP node path.
-        block: Wait for cooking to complete.
+        block: Wait for cooking to complete. A blocking cook holds Houdini's
+            main thread, so every other command, cancel_top_cook included,
+            waits behind it until it ends or times out. For a long cook pass
+            False and follow get_work_item_states.
         generate_only: Only generate work items, do not cook.
     """
     bridge = _get_bridge(ctx)
