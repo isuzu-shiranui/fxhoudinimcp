@@ -23,6 +23,7 @@ import httpx
 
 # Internal
 from fxhoudinimcp.errors import ConnectionError, HoudiniCommandError
+from fxhoudinimcp.instance import auth_headers
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,11 @@ async def find_servers(
 
     async def probe(client: httpx.AsyncClient, port: int) -> dict[str, Any] | None:
         try:
-            response = await client.post(f"http://{host}:{port}/api", data=_rpc_body("mcp.health"))
+            response = await client.post(
+                f"http://{host}:{port}/api",
+                data=_rpc_body("mcp.health"),
+                headers=auth_headers(port),
+            )
             response.raise_for_status()
             payload = response.json()
         except Exception:
@@ -70,11 +75,17 @@ async def find_servers(
             return {**payload, "port": port}
         return None
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         answers = await asyncio.gather(
             *(probe(client, port) for port in range(base, base + max_tries))
         )
     return [answer for answer in answers if answer is not None]
+
+
+def _new_client(timeout: float) -> httpx.AsyncClient:
+    # trust_env=False: HTTP(S)_PROXY from the environment would otherwise route
+    # commands, and the bearer token, through a proxy.
+    return httpx.AsyncClient(timeout=timeout, trust_env=False)
 
 
 class HoudiniBridge:
@@ -103,14 +114,14 @@ class HoudiniBridge:
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout)
+            self._client = _new_client(self.timeout)
         return self._client
 
     async def _reset_client(self) -> httpx.AsyncClient:
         """Discard the connection pool and return a fresh client."""
         if self._client is not None and not self._client.is_closed:
             await self._client.aclose()
-        self._client = httpx.AsyncClient(timeout=self.timeout)
+        self._client = _new_client(self.timeout)
         return self._client
 
     async def _post(
@@ -135,11 +146,15 @@ class HoudiniBridge:
 
         client = await self._get_client()
         try:
-            return await client.post(self._api_url, data=data, timeout=effective)
+            return await client.post(
+                self._api_url, data=data, timeout=effective, headers=auth_headers(self.port)
+            )
         except httpx.RemoteProtocolError:
             logger.info("Stale connection to Houdini; reconnecting.")
             client = await self._reset_client()
-            return await client.post(self._api_url, data=data, timeout=effective)
+            return await client.post(
+                self._api_url, data=data, timeout=effective, headers=auth_headers(self.port)
+            )
 
     async def execute(
         self,

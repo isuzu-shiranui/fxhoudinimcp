@@ -19,6 +19,7 @@ import hou
 
 # Internal
 from fxhoudinimcp_server.callbacks import press
+from fxhoudinimcp_server.config import require_inside_project_root
 from fxhoudinimcp_server.dispatcher import register_handler
 from fxhoudinimcp_server.outputs import (
     at_frame as _at_frame,
@@ -346,6 +347,12 @@ def _clear_cache(
         existing_files = sorted(glob.glob(glob_pattern))
     except Exception:
         existing_files = []
+
+    # The node's output parm is not checked when it is set, but the deletions
+    # happen here, so they are held to the project root like any file this
+    # plugin opens or writes. Every file is checked before the first removal.
+    for filepath in existing_files:
+        require_inside_project_root(filepath, "Cache file")
 
     import re
 

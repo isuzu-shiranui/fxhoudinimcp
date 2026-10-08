@@ -22,7 +22,7 @@ import traceback
 import hwebserver
 
 # Internal
-from fxhoudinimcp_server import dispatcher
+from fxhoudinimcp_server import dispatcher, instance, startup
 from fxhoudinimcp_server.serialize import json_default
 
 ###### Registration
@@ -87,6 +87,13 @@ def _bare_host(host: str) -> str:
     return host
 
 
+def _headers(request) -> dict[str, str]:
+    try:
+        return {str(k).lower(): str(v) for k, v in dict(request.headers()).items()}
+    except Exception:
+        return {}
+
+
 def _foreign_request_reason(request) -> str | None:
     """Why *request* must not reach the dispatcher, or None if it may.
 
@@ -98,10 +105,7 @@ def _foreign_request_reason(request) -> str | None:
     attacker controls resolves to 127.0.0.1: unless FXHOUDINIMCP_BIND was
     widened on purpose, only a loopback host name is served.
     """
-    try:
-        headers = {str(k).lower(): str(v) for k, v in dict(request.headers()).items()}
-    except Exception:
-        headers = {}
+    headers = _headers(request)
     if "origin" in headers:
         return (
             f"request carries an Origin header ({headers['origin']}); "
@@ -120,9 +124,32 @@ def _foreign_request_reason(request) -> str | None:
     return None
 
 
-def _forbidden(reason: str) -> hwebserver.Response:
-    body = json.dumps({"status": "error", "error": {"code": "FORBIDDEN_ORIGIN", "message": reason}})
-    return hwebserver.Response(body.encode("utf-8"), 403, "application/json")
+def _error(status: int, code: str, message: str) -> hwebserver.Response:
+    body = json.dumps({"status": "error", "error": {"code": code, "message": message}})
+    return hwebserver.Response(body.encode("utf-8"), status, "application/json")
+
+
+def _refusal(request) -> hwebserver.Response | None:
+    """The response refusing *request*, or None if it may be served.
+
+    Applied to every endpoint: session_info returns the hip path, so even the
+    read-only ones are worth keeping from a browser or another local user.
+    """
+    reason = _foreign_request_reason(request)
+    if reason is not None:
+        return _error(403, "FORBIDDEN_ORIGIN", reason)
+    if not instance.authorized(_headers(request).get("authorization")):
+        return _error(
+            401,
+            "UNAUTHORIZED",
+            "missing or wrong bearer token; the MCP server reads it from the "
+            "instance descriptor that Houdini writes on start",
+        )
+    return None
+
+
+def _stopped() -> hwebserver.Response:
+    return _error(503, "SERVER_STOPPED", "the FXHoudini-MCP server was stopped in Houdini")
 
 
 ###### Endpoints
@@ -138,9 +165,11 @@ def execute(request, command="", params=None, request_id=""):
         params: Tool-specific parameters dict.
         request_id: Correlation ID echoed back in the response.
     """
-    reason = _foreign_request_reason(request)
-    if reason is not None:
-        return _forbidden(reason)
+    refusal = _refusal(request)
+    if refusal is not None:
+        return refusal
+    if not startup.is_accepting():
+        return _stopped()
     if params is None:
         params = {}
 
@@ -162,9 +191,15 @@ def health(request):
     Version comes from the environment for the same reason -- Houdini exports
     HOUDINI_VERSION, so reporting it costs no HOM call. Anything needing the
     scene itself belongs in session_info.
+
+    A stopped server still answers, as "stopped", so a restart in the same
+    session recognises its own port; the MCP client skips anything not "ok".
     """
+    refusal = _refusal(request)
+    if refusal is not None:
+        return refusal
     return {
-        "status": "ok",
+        "status": "ok" if startup.is_accepting() else "stopped",
         "pid": os.getpid(),
         "houdini_version": os.environ.get("HOUDINI_VERSION", "unknown"),
     }
@@ -177,10 +212,20 @@ def session_info(request):
     Separate from health because this does touch HOM: it goes through the
     normal dispatch path, so it is only safe once the session is idle.
     """
+    refusal = _refusal(request)
+    if refusal is not None:
+        return refusal
+    if not startup.is_accepting():
+        return _stopped()
     return _json_response(dispatcher.dispatch("scene.get_scene_info", {}))
 
 
 @_api_function("mcp")
 def list_commands(request):
     """List all registered command names for introspection."""
+    refusal = _refusal(request)
+    if refusal is not None:
+        return refusal
+    if not startup.is_accepting():
+        return _stopped()
     return {"commands": dispatcher.list_commands()}

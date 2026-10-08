@@ -263,6 +263,8 @@ Every tool call is one undo step. Tools leave your selection, viewport camera an
 | `FXHOUDINIMCP_TIMEOUT` | `120` | Houdini | Seconds a command may run; `write_cache`, `start_render`, `cook_frame_range` and `press_button` have no deadline |
 | `FXHOUDINIMCP_TIMEOUT_<COMMAND>` | unset | Houdini | Per-command override: `FXHOUDINIMCP_TIMEOUT_TOPS_COOK_TOP_NODE=900` |
 | `FXHOUDINIMCP_OUTPUT_GRACE` | `2` | Houdini | Seconds a render or cache may take to show its file before it counts as not written |
+| `FXHOUDINIMCP_TOKEN` | unset | both | Fixed bearer token instead of a generated one, for a client on another machine. Set the same value on both ends |
+| `FXHOUDINIMCP_STATE_DIR` | `%LOCALAPPDATA%\fxhoudinimcp`, `~/.local/share/fxhoudinimcp` | both | Where Houdini writes `instances/<port>.json` with its token |
 | `HOUDINI_HOST` | `localhost` | client | Houdini host |
 | `HOUDINI_PORT` | scan 8100-8115 | client | Pin one Houdini port; switches off the scan |
 | `HOUDINI_TIMEOUT` | plugin timeout + 15 | client | Seconds the client waits for a command |
@@ -276,11 +278,13 @@ Houdini-side variables live in the package file `install` wrote, where every one
 ## Security
 
 <!-- --8<-- [start:security] -->
-A connection to this server is a shell inside your Houdini session: `execute_python` runs arbitrary code, and there is no authentication or per-tool permission. It is built for one artist's workstation and an MCP client they trust.
+A connection to this server is a shell inside your Houdini session: `execute_python` runs arbitrary code, and there is no per-tool permission. It is built for one artist's workstation and an MCP client they trust.
 
-- The plugin binds to loopback unless `FXHOUDINIMCP_BIND` says otherwise.
+- Every request needs a bearer token. Houdini generates one per start and writes it, with its port and pid, to `instances/<port>.json` in the state directory, which only your OS user can read. The client reads it from there.
+- The plugin binds to loopback unless `FXHOUDINIMCP_BIND` says otherwise, and does not start if a loopback bind cannot be set.
+- Stop Server makes every endpoint refuse and removes the token file. The port stays open, because hwebserver also serves Houdini's own features.
 - Requests with an `Origin` header (a web page) or a non-loopback `Host` (DNS rebinding) are refused.
-- `FXHOUDINIMCP_PROJECT_ROOT` confines the files the tools open, save, import, export or install. It does not check paths written into parameters (a File SOP, a ROP output), and `execute_python` / `execute_hscript` are not sandboxed.
+- `FXHOUDINIMCP_PROJECT_ROOT` confines the files the tools open, save, import, export, install or delete with `clear_cache`. It does not check paths written into parameters (a File SOP, a ROP output), and `execute_python` / `execute_hscript` are not sandboxed.
 - Recovery from a bad change is undo, one step per tool call.
 <!-- --8<-- [end:security] -->
 

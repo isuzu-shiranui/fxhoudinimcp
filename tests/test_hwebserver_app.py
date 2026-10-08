@@ -99,3 +99,54 @@ def test_unreadable_headers_do_not_crash():
 )
 def test_bare_host(host, bare):
     assert _bare_host(host) == bare
+
+
+###### Bearer token and stopped state
+
+from fxhoudinimcp_server import hwebserver_app, instance, startup  # noqa: E402
+
+
+@pytest.fixture
+def served(monkeypatch):
+    """A started session with token "t0k3n"; _error returns (status, code)."""
+    monkeypatch.setattr(instance, "_token", "t0k3n")
+    monkeypatch.setattr(startup, "_accepting", True)
+    monkeypatch.setattr(hwebserver_app, "_error", lambda status, code, message: (status, code))
+    monkeypatch.setattr(hwebserver_app, "_json_response", lambda payload: payload)
+    monkeypatch.setattr(hwebserver_app.dispatcher, "dispatch", lambda command, params: {"ok": 1})
+
+
+def _authed(token="t0k3n"):
+    return _Request({"Authorization": f"Bearer {token}"})
+
+
+@pytest.mark.parametrize(
+    "request_", [_Request({}), _authed("wrong"), _Request({"Authorization": "t0k3n"})]
+)
+def test_every_endpoint_refuses_without_the_token(served, request_):
+    """Any local process could otherwise run Python in Houdini."""
+    for call in (
+        lambda: hwebserver_app.execute(request_, command="x"),
+        lambda: hwebserver_app.health(request_),
+        lambda: hwebserver_app.session_info(request_),
+        lambda: hwebserver_app.list_commands(request_),
+    ):
+        assert call() == (401, "UNAUTHORIZED")
+
+
+def test_token_is_refused_before_any_start(served, monkeypatch):
+    monkeypatch.setattr(instance, "_token", None)
+    assert hwebserver_app.execute(_authed(), command="x") == (401, "UNAUTHORIZED")
+
+
+def test_the_right_token_is_served(served):
+    assert hwebserver_app.execute(_authed(), command="x", request_id="r")["ok"] == 1
+    assert hwebserver_app.health(_authed())["status"] == "ok"
+
+
+def test_stopped_server_refuses_commands(served, monkeypatch):
+    """Stop Server used to flip a flag and keep executing."""
+    monkeypatch.setattr(startup, "_accepting", False)
+    assert hwebserver_app.execute(_authed(), command="x") == (503, "SERVER_STOPPED")
+    assert hwebserver_app.session_info(_authed()) == (503, "SERVER_STOPPED")
+    assert hwebserver_app.health(_authed())["status"] == "stopped"

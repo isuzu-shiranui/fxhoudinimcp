@@ -6,15 +6,28 @@ Handles starting/stopping the hwebserver and loading handler modules.
 from __future__ import annotations
 
 # Built-in
+import atexit
 import json
 import os
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
+# Internal
+from fxhoudinimcp_server import instance
+
 _server_started = False
 _port = 8100
+
+# Whether the API answers commands. Separate from _server_started, which stays
+# False for the whole life of a foreground hython server. stop() clears this
+# rather than shutting hwebserver down, because requestShutdown() would also
+# stop Houdini's own web features on the same server.
+_accepting = False
+
+_LOOPBACK_ADDRESSES = frozenset({"127.0.0.1", "localhost", "::1"})
 
 # True while an auto-start readiness check is still in flight on a worker
 # thread, so a menu click during startup does not start a second server.
@@ -33,6 +46,10 @@ _READINESS_TIMEOUT = 15.0
 _PORT_SEARCH_RANGE = 16
 
 
+# The probe goes to loopback; a proxy from the environment must not see it.
+_NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def _health_url(port: int) -> str:
     return f"http://127.0.0.1:{port}/api"
 
@@ -42,15 +59,27 @@ def _health_body() -> bytes:
 
 
 def _query_health(port: int, timeout: float = 0.5) -> dict | None:
+    """mcp.health on *port* with this session's token, or None if nothing answers.
+
+    A 401 means a server is there but holds another token, i.e. another Houdini,
+    and is reported as such so the port is not mistaken for a free one.
+    """
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    if instance.token() is not None:
+        headers["Authorization"] = f"Bearer {instance.token()}"
     request = urllib.request.Request(
         _health_url(port),
         data=_health_body(),
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        headers=headers,
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _NO_PROXY.open(request, timeout=timeout) as response:
             payload = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return {"status": "unauthorized", "pid": None}
+        return None
     except Exception:
         return None
 
@@ -119,11 +148,14 @@ def _bind_localhost_only(hwebserver) -> None:
     hwebserver binds the any-address (0.0.0.0) by default, which would put
     this bridge on the LAN. That matters more here than for a typical web
     endpoint: the bridge runs arbitrary Python inside Houdini (see
-    handlers/code_handlers.py) and has no authentication, so anyone able to
-    reach the port has the session.
+    handlers/code_handlers.py), and the bearer token is the only other thing
+    between the network and the session.
 
     Set FXHOUDINIMCP_BIND to override, e.g. "0.0.0.0" to accept remote
     connections deliberately.
+
+    Raises when a loopback address was asked for and could not be set, since
+    serving anyway would fall back to 0.0.0.0.
     """
     address = os.environ.get("FXHOUDINIMCP_BIND", "127.0.0.1")
     try:
@@ -131,10 +163,12 @@ def _bind_localhost_only(hwebserver) -> None:
         # number first raises AttributeError on 'int'.
         hwebserver.setSettingsForPort({"ADDRESS": address}, "main")
     except Exception as exc:
-        print(
-            f"[fxhoudinimcp] Warning: could not restrict bind address to "
-            f"{address}: {exc}. The port may be reachable from the network."
-        )
+        if address in _LOOPBACK_ADDRESSES:
+            raise RuntimeError(
+                f"could not restrict the bind address to {address} ({exc}); "
+                f"not starting, because hwebserver would listen on every interface"
+            ) from exc
+        print(f"[fxhoudinimcp] Warning: could not set bind address {address}: {exc}")
 
 
 def start(
@@ -163,7 +197,7 @@ def start(
             would stall Houdini's UI; readiness is then confirmed on a worker
             thread and failure is printed rather than raised.
     """
-    global _server_started, _port, _starting
+    global _server_started, _port, _starting, _accepting
 
     if _server_started:
         print("[fxhoudinimcp] Server already running")
@@ -206,6 +240,14 @@ def start(
         background = hou.isUIAvailable()
 
     _bind_localhost_only(hwebserver)
+    instance.new_token()
+    if not background:
+        # run() never returns while a foreground server is up, so the descriptor
+        # has to go out first. A second process racing for the same port can
+        # overwrite it here; the background path publishes only once the port
+        # is proven to be ours.
+        instance.publish(_port, os.environ.get("HOUDINI_VERSION", "unknown"))
+    _accepting = True
 
     run_error = None
     try:
@@ -216,7 +258,7 @@ def start(
     if not background:
         # run() blocks until shutdown when serving in the foreground, so
         # reaching this point means it either finished or never started.
-        _server_started = False
+        _stand_down()
         if run_error is not None:
             raise RuntimeError(f"hwebserver failed to start on port {_port}: {run_error}")
         return
@@ -248,18 +290,23 @@ def _confirm_ready(run_error: Exception | None) -> None:
 
     health = _wait_for_current_process_health(_port)
     if health is None:
-        _server_started = False
+        _stand_down()
         detail = f": {run_error}" if run_error is not None else ""
         raise RuntimeError(f"hwebserver did not answer mcp.health on port {_port}{detail}")
 
     health_pid = health.get("pid")
     if health_pid != os.getpid():
-        _server_started = False
+        _stand_down()
         raise RuntimeError(
             f"hwebserver port {_port} is owned by another Houdini process "
             f"(pid {health_pid}), current pid {os.getpid()}"
         )
 
+    if not _accepting or health.get("status") != "ok":
+        # Stop Server was pressed while this check was polling.
+        return
+
+    instance.publish(_port, health.get("houdini_version", "unknown"))
     _server_started = True
     print(
         "[fxhoudinimcp] Server ready on port {} (Houdini {}, pid {})".format(
@@ -287,21 +334,39 @@ def _confirm_ready_async(run_error: Exception | None) -> None:
         _starting = False
 
 
+def _stand_down() -> None:
+    """Refuse further commands and withdraw the descriptor."""
+    global _server_started, _accepting
+    _server_started = False
+    _accepting = False
+    instance.withdraw()
+
+
+atexit.register(instance.withdraw)
+
+
 def stop() -> None:
-    """Stop the FXHoudini-MCP server."""
-    global _server_started
-    if not _server_started:
+    """Stop answering MCP commands.
+
+    hwebserver keeps listening, since requestShutdown() would take Houdini's own
+    web features down with it, but every endpoint refuses from here on and
+    mcp.health reports "stopped", so the MCP client no longer picks this session.
+    """
+    if not _server_started and not _accepting:
         return
 
-    # Note: we don't call hwebserver.requestShutdown() because that would
-    # kill Houdini's built-in web server too. We just mark ourselves as stopped.
-    _server_started = False
+    _stand_down()
     print("[fxhoudinimcp] Server stopped")
 
 
 def is_running() -> bool:
     """Check if the server is currently running."""
     return _server_started
+
+
+def is_accepting() -> bool:
+    """Whether the API endpoints should answer commands."""
+    return _accepting
 
 
 def get_port() -> int:

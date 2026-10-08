@@ -18,10 +18,13 @@ from fxhoudinimcp_server import startup  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def reset_startup_state(monkeypatch):
+def reset_startup_state(monkeypatch, tmp_path):
     monkeypatch.setattr(startup, "_server_started", False)
     monkeypatch.setattr(startup, "_starting", False)
+    monkeypatch.setattr(startup, "_accepting", True)
     monkeypatch.setattr(startup, "_port", 8100)
+    monkeypatch.setattr(startup.instance, "_descriptor_path", None)
+    monkeypatch.setenv("FXHOUDINIMCP_STATE_DIR", str(tmp_path))
 
 
 def test_wait_for_current_process_health_accepts_current_pid(monkeypatch):
@@ -98,7 +101,7 @@ def test_confirm_ready_marks_running(monkeypatch):
     monkeypatch.setattr(
         startup,
         "_wait_for_current_process_health",
-        lambda port: {"pid": os.getpid(), "houdini_version": "22.0.368"},
+        lambda port: {"status": "ok", "pid": os.getpid(), "houdini_version": "22.0.368"},
     )
 
     startup._confirm_ready(None)
@@ -144,7 +147,7 @@ def test_async_confirm_clears_starting_on_success(monkeypatch):
     monkeypatch.setattr(
         startup,
         "_wait_for_current_process_health",
-        lambda port: {"pid": os.getpid(), "houdini_version": "22.0.368"},
+        lambda port: {"status": "ok", "pid": os.getpid(), "houdini_version": "22.0.368"},
     )
 
     startup._confirm_ready_async(None)
@@ -214,3 +217,70 @@ def test_raises_when_every_port_is_taken():
 def test_search_range_is_bounded():
     """Each failed probe costs a request, so the range must stay small."""
     assert 4 <= startup._PORT_SEARCH_RANGE <= 64
+
+
+###### Bind restriction and the instance descriptor
+
+
+class _Hwebserver:
+    def setSettingsForPort(self, settings, port_name):
+        raise AttributeError("no such API")
+
+
+def test_loopback_bind_failure_aborts_the_start(monkeypatch):
+    """Serving anyway would listen on 0.0.0.0."""
+    monkeypatch.delenv("FXHOUDINIMCP_BIND", raising=False)
+    with pytest.raises(RuntimeError, match="not starting"):
+        startup._bind_localhost_only(_Hwebserver())
+
+
+def test_widened_bind_failure_only_warns(monkeypatch, capsys):
+    monkeypatch.setenv("FXHOUDINIMCP_BIND", "0.0.0.0")
+    startup._bind_localhost_only(_Hwebserver())
+    assert "Warning" in capsys.readouterr().out
+
+
+def test_withdraw_leaves_another_sessions_descriptor(monkeypatch, tmp_path):
+    """A Houdini that took the port since must keep its token file."""
+    from fxhoudinimcp_server import instance
+
+    monkeypatch.setenv("FXHOUDINIMCP_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(instance, "_token", "mine")
+    path = instance.publish(8100, "22.0")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write('{"pid": 1, "token": "theirs"}')
+
+    instance.withdraw()
+
+    with open(path, encoding="utf-8") as handle:
+        assert "theirs" in handle.read()
+
+
+def test_stop_during_the_readiness_poll_is_not_undone(monkeypatch):
+    """A late confirmation used to mark a stopped server as running again."""
+    monkeypatch.setattr(startup, "_accepting", False)
+    monkeypatch.setattr(
+        startup,
+        "_wait_for_current_process_health",
+        lambda port: {"status": "stopped", "pid": os.getpid()},
+    )
+
+    startup._confirm_ready(None)
+
+    assert startup.is_running() is False
+    assert startup.instance._descriptor_path is None
+
+
+def test_losing_a_port_race_publishes_nothing(monkeypatch):
+    """The loser used to overwrite, then delete, the winner's token file."""
+    monkeypatch.setattr(
+        startup,
+        "_wait_for_current_process_health",
+        lambda port: {"status": "unauthorized", "pid": None},
+    )
+    published = []
+    monkeypatch.setattr(startup.instance, "publish", lambda *a: published.append(a))
+
+    with pytest.raises(RuntimeError, match="another Houdini"):
+        startup._confirm_ready(None)
+    assert published == []

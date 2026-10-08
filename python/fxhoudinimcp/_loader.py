@@ -28,10 +28,24 @@ _LAYOUT_OFF = "shared/layout_off.md"
 _HOUSEKEEPING = "shared/housekeeping.md"
 
 
+def _shipped_path(name: str) -> Path | None:
+    """*name* resolved under ``markdown/``, or None if it escapes that directory.
+
+    Prompt arguments reach these names (simulation_setup builds
+    ``workflows/{sim_type}.md``), so ``..`` or a backslash in an argument would
+    otherwise read any ``.md`` the server process can open.
+    """
+    path = (_MD_DIR / name).resolve()
+    return path if path.is_relative_to(_MD_DIR.resolve()) else None
+
+
 @cache
 def _read(name: str) -> str:
     """Read a markdown file once and cache it for the process lifetime."""
-    return (_MD_DIR / name).read_text(encoding="utf-8")
+    path = _shipped_path(name)
+    if path is None:
+        raise ValueError(f"Prompt file '{name}' is outside the bundled markdown directory")
+    return path.read_text(encoding="utf-8")
 
 
 @cache
@@ -42,7 +56,8 @@ def markdown_exists(name: str) -> bool:
     one, which is how simulation_setup serves a deep pyro guide without
     needing a separate MCP prompt per solver.
     """
-    return (_MD_DIR / name).is_file()
+    path = _shipped_path(name)
+    return path is not None and path.is_file()
 
 
 def _layout_guidance() -> str:

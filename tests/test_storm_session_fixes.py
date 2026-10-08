@@ -315,7 +315,7 @@ async def test_no_timeout_sentinel_disables_the_http_deadline(monkeypatch):
     seen = {}
 
     class FakeClient:
-        async def post(self, url, data=None, timeout="unset"):
+        async def post(self, url, data=None, timeout="unset", headers=None):
             seen["timeout"] = timeout
             return MagicMock()
 

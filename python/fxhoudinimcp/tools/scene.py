@@ -54,6 +54,16 @@ async def get_houdini_connection_status(ctx: Context) -> dict:
             "details": {"type": type(exc).__name__},
             "sessions": sessions,
         }
+    if not isinstance(health, dict) or health.get("status") != "ok":
+        # "stopped": Stop Server was pressed. It still answers health so a
+        # restart can find its own port, but it refuses every command.
+        return {
+            "connected": False,
+            "base_url": bridge.base_url,
+            "error": "The plugin in Houdini is stopped; use Start Server there.",
+            "health": health,
+            "sessions": sessions,
+        }
 
     # mcp.health is deliberately free of hou.* access, so it cannot report the
     # open scene. Fetch that separately to keep this tool's payload shape

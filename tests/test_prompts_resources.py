@@ -8,6 +8,7 @@ from __future__ import annotations
 
 # Built-in
 import re
+import sys
 from pathlib import Path
 
 # Third-party
@@ -220,3 +221,26 @@ class TestInstructionSize:
         text = workflow_guide_text("discipline")
         assert "ISOLATE WHILE ITERATING" in text
         assert "COMMONLY MISSED NODE DOMAINS" in text
+
+
+@pytest.mark.parametrize(
+    "sep",
+    [
+        "/",
+        pytest.param(
+            "\\",
+            marks=pytest.mark.skipif(
+                sys.platform != "win32", reason="a backslash is not a separator on POSIX"
+            ),
+        ),
+    ],
+)
+def test_prompt_names_cannot_leave_the_bundled_markdown(sep):
+    """sim_type is client input; ../ used to read any .md the server could open."""
+    from fxhoudinimcp._loader import _MD_DIR, _read, markdown_exists
+
+    name = "workflows/" + sep.join([".."] * 5) + sep + "CONTRIBUTING.md"
+    assert (_MD_DIR / name).is_file(), "the target must exist for this to prove anything"
+    assert not markdown_exists(name)
+    with pytest.raises(ValueError):
+        _read(name)
